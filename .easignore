@@ -1,0 +1,28 @@
+# EAS Build ignore file
+# Exclude OneDrive and temporary files that cause casing issues
+
+AppData/
+Local/
+Temp/
+Microsoft/
+OneDrive/
+logs/
+Common/
+*.odl
+*.aodl
+*.tmp
+*.psm1
+*.ps1
+
+# Exclude development files
+node_modules/
+.expo/
+.vscode/
+.cursor/
+.bmad-core/
+
+# Exclude build artifacts
+android/
+ios/
+dist/
+build/
