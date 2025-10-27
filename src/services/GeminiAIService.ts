@@ -16,16 +16,83 @@ export interface SignDescription {
 
 export class GeminiAIService {
   private static baseUrl: string = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
+  
+  // Array of API keys for rotation and failover
+  private static apiKeys: string[] = [];
+  private static currentKeyIndex: number = 0;
+  private static failedKeys: Set<number> = new Set();
 
   /**
-   * Get API key from environment variables
+   * Get API keys from environment variables
+   * Supports multiple keys for rate limit handling
+   */
+  private static getApiKeys(): string[] {
+    if (this.apiKeys.length === 0) {
+      // Get primary API key
+      const primaryKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
+      if (primaryKey) {
+        this.apiKeys.push(primaryKey);
+      }
+
+      // Get additional API keys (API_KEY_2, API_KEY_3, etc.)
+      for (let i = 2; i <= 10; i++) {
+        const key = process.env[`EXPO_PUBLIC_GEMINI_API_KEY_${i}`];
+        if (key) {
+          this.apiKeys.push(key);
+        }
+      }
+
+      if (this.apiKeys.length === 0) {
+        throw new Error('No Gemini API keys found. Please set EXPO_PUBLIC_GEMINI_API_KEY or EXPO_PUBLIC_GEMINI_API_KEY_2, etc. in your .env file.');
+      }
+
+      console.log(`GeminiAIService: Loaded ${this.apiKeys.length} API keys`);
+    }
+
+    return this.apiKeys;
+  }
+
+  /**
+   * Get current API key with rotation
    */
   private static getApiKey(): string {
-    const apiKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error('Gemini API key not found in environment variables. Please set EXPO_PUBLIC_GEMINI_API_KEY in your .env file.');
-    }
-    return apiKey;
+    const keys = this.getApiKeys();
+    return keys[this.currentKeyIndex];
+  }
+
+  /**
+   * Switch to next API key when rate limited or failed
+   */
+  private static rotateApiKey(): void {
+    const keys = this.getApiKeys();
+    
+    // Mark current key as failed
+    this.failedKeys.add(this.currentKeyIndex);
+    
+    // Find next available key
+    const startIndex = this.currentKeyIndex;
+    let attempts = 0;
+    
+    do {
+      this.currentKeyIndex = (this.currentKeyIndex + 1) % keys.length;
+      attempts++;
+      
+      if (attempts > keys.length) {
+        // All keys have been used, reset failed keys and try again
+        console.warn('GeminiAIService: All API keys have failed, resetting failed keys');
+        this.failedKeys.clear();
+      }
+    } while (this.failedKeys.has(this.currentKeyIndex) && attempts < keys.length * 2);
+    
+    console.log(`GeminiAIService: Rotated to API key ${this.currentKeyIndex + 1} of ${keys.length}`);
+  }
+
+  /**
+   * Check if we should retry with a different key
+   */
+  private static isRetryableError(statusCode: number): boolean {
+    // Rate limit (429) or quota exceeded errors
+    return statusCode === 429 || statusCode === 503;
   }
 
   /**
@@ -103,19 +170,18 @@ export class GeminiAIService {
       motivation: 'inspiration and drive'
     };
 
-    return `You are an expert astrologer and motivational writer. Generate a ${timeContext[timeOfDay as keyof typeof timeContext]} astrology quote for a ${sign} person focusing on ${categoryContext[category as keyof typeof categoryContext]}.
+    return `Generate a short, concise astrology quote for a ${sign} person. Keep it EXACTLY 50 words or less.
 
-Requirements:
-- Exactly 150-200 words
-- Personalized for ${sign} zodiac sign
-- Appropriate for ${timeOfDay} timing
-- Focus on ${category} theme
-- Inspiring and motivational tone
-- Include specific astrological insights
-- Use "you" and "your" to make it personal
-- End with an empowering call to action
+Context: ${timeOfDay} timing, focusing on ${category}
 
-Format: Write only the quote content, no additional text or formatting.`;
+Rules:
+1. Count each word - the quote must be 50 words or fewer
+2. Write in a personal tone using "you" and "your"
+3. Include ${sign}-specific astrological insights
+4. Keep it inspiring and empowering
+5. End with a call to action
+
+Write ONLY the quote text, no explanations or extra text.`;
   }
 
   /**
@@ -170,44 +236,86 @@ Format your response as JSON:
   }
 
   /**
-   * Call Gemini API
+   * Call Gemini API with automatic retry and key rotation
    */
-  private static async callGeminiAPI(prompt: string): Promise<string> {
-    const apiKey = this.getApiKey();
+  private static async callGeminiAPI(prompt: string, maxRetries: number = 3): Promise<string> {
+    const keys = this.getApiKeys();
+    let lastError: Error | null = null;
+    let startKeyIndex = this.currentKeyIndex;
 
-    const response = await fetch(`${this.baseUrl}?key=${apiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: prompt
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.7,
-          topK: 40,
-          topP: 0.95,
-          maxOutputTokens: 1024,
+    for (let attempt = 0; attempt < maxRetries * keys.length; attempt++) {
+      try {
+        const apiKey = this.getApiKey();
+        console.log(`GeminiAIService: Attempt ${attempt + 1} with API key ${this.currentKeyIndex + 1} of ${keys.length}`);
+
+        const response = await fetch(`${this.baseUrl}?key=${apiKey}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{
+                text: prompt
+              }]
+            }],
+            generationConfig: {
+              temperature: 0.7,
+              topK: 40,
+              topP: 0.95,
+              maxOutputTokens: 1024,
+            }
+          })
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          console.error(`GeminiAIService: API error (status ${response.status}):`, error);
+
+          // If rate limited, try next key
+          if (this.isRetryableError(response.status)) {
+            console.log(`GeminiAIService: Rate limited on key ${this.currentKeyIndex + 1}, rotating to next key`);
+            this.rotateApiKey();
+            
+            // Add small delay before retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          }
+
+          throw new Error(`Gemini API error: ${response.status}`);
         }
-      })
-    });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error('GeminiAIService: API error:', error);
-      throw new Error(`Gemini API error: ${response.status}`);
+        const data = await response.json();
+        
+        if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+          throw new Error('Invalid response from Gemini API');
+        }
+
+        // Success - reset failed keys on successful response
+        if (this.failedKeys.size > 0 && startKeyIndex !== this.currentKeyIndex) {
+          console.log('GeminiAIService: Successfully recovered from failed key');
+          this.failedKeys.clear();
+        }
+
+        return data.candidates[0].content.parts[0].text;
+
+      } catch (error) {
+        lastError = error as Error;
+        console.error(`GeminiAIService: Attempt ${attempt + 1} failed:`, error);
+
+        // On error, try next key
+        if (attempt < maxRetries * keys.length - 1) {
+          console.log(`GeminiAIService: Rotating to next API key`);
+          this.rotateApiKey();
+          
+          // Small delay before retry
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
     }
 
-    const data = await response.json();
-    
-    if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
-      throw new Error('Invalid response from Gemini API');
-    }
-
-    return data.candidates[0].content.parts[0].text;
+    // All retries failed
+    throw new Error(`Gemini API failed after ${maxRetries * keys.length} attempts: ${lastError?.message || 'Unknown error'}`);
   }
 
   /**
@@ -250,10 +358,21 @@ Format your response as JSON:
    */
   static isConfigured(): boolean {
     try {
-      this.getApiKey();
-      return true;
+      const keys = this.getApiKeys();
+      return keys.length > 0;
     } catch (error) {
       return false;
     }
+  }
+
+  /**
+   * Get API key statistics for debugging
+   */
+  static getApiKeyStats(): { total: number; current: number; failed: number } {
+    return {
+      total: this.apiKeys.length,
+      current: this.currentKeyIndex,
+      failed: this.failedKeys.size
+    };
   }
 }

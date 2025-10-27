@@ -1,15 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  Dimensions,
-  Image,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    Dimensions,
+    Image,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { DailyQuoteCard } from '../components/DailyQuoteCard';
+import { DailyQuoteModalCard } from '../components/DailyQuoteModalCard';
 import { useAuth } from '../contexts/AuthContext';
 import { AstrologyService } from '../services/AstrologyService';
 import { CompatibilityService } from '../services/CompatibilityService';
@@ -34,12 +36,46 @@ export const ExploreScreen: React.FC<ExploreScreenProps> = ({ onNavigateToChat, 
   const [browseCount, setBrowseCount] = useState(0);
   const [maxBrowseLimit, setMaxBrowseLimit] = useState(5);
   const [isProfileComplete, setIsProfileComplete] = useState(false);
+  const [showDailyQuote, setShowDailyQuote] = useState(false);
 
   useEffect(() => {
     loadProfiles();
     loadCurrentUserProfile();
     checkBrowseLimits();
-  }, []);
+    checkAndShowDailyQuote();
+  }, [user]); // Add user to dependencies
+
+  const checkAndShowDailyQuote = async () => {
+    if (!user) {
+      console.log('No user logged in, skipping daily quote');
+      return;
+    }
+    
+    // DISABLED AUTO-SHOW - User will tap button to open modal
+    console.log('Daily quote modal disabled - user must tap button to open');
+    setShowDailyQuote(false);
+    
+    try {
+      // TEMPORARILY DISABLED - Will re-enable after testing
+      /*
+      const lastShownDate = await AsyncStorage.getItem('lastDailyQuoteShown');
+      const today = new Date().toISOString().split('T')[0];
+      
+      console.log('CheckAndShowDailyQuote:', { lastShownDate, today });
+      
+      if (!lastShownDate || lastShownDate !== today) {
+        console.log('Showing daily quote modal');
+        setShowDailyQuote(true);
+        await AsyncStorage.setItem('lastDailyQuoteShown', today);
+      } else {
+        console.log('Daily quote already shown today');
+      }
+      */
+    } catch (error) {
+      console.error('Error checking daily quote:', error);
+      setShowDailyQuote(false);
+    }
+  };
 
   const loadProfiles = async () => {
     try {
@@ -54,6 +90,13 @@ export const ExploreScreen: React.FC<ExploreScreenProps> = ({ onNavigateToChat, 
       
       if (error) {
         console.error('ExploreScreen: Error loading profiles:', error);
+        // Check if it's a "no profile found" error
+        if (error.code === 'PGRST116' || error.message?.includes('0 rows')) {
+          console.log('ExploreScreen: No profile found for current user - staying on explore screen');
+          // Don't show alert, just stay on explore screen
+          setProfiles([]);
+          return;
+        }
         Alert.alert('Error', 'Failed to load profiles');
         return;
       }
@@ -71,7 +114,15 @@ export const ExploreScreen: React.FC<ExploreScreenProps> = ({ onNavigateToChat, 
     try {
       if (user) {
         console.log('ExploreScreen: Loading current user profile for user:', user.id);
-        const { data } = await ProfileService.getCurrentProfile();
+        const { data, error } = await ProfileService.getCurrentProfile();
+        
+        // If no profile found, stay on explore screen
+        if (error && (error.code === 'PGRST116' || error.message?.includes('0 rows'))) {
+          console.log('ExploreScreen: No profile found for current user - allowing explore access');
+          setCurrentUserProfile(null);
+          return;
+        }
+        
         console.log('ExploreScreen: Current user profile loaded:', {
           hasProfile: !!data,
           birth_date: data?.birth_date,
@@ -83,22 +134,54 @@ export const ExploreScreen: React.FC<ExploreScreenProps> = ({ onNavigateToChat, 
       }
     } catch (error) {
       console.error('Failed to load current user profile:', error);
+      // Even if there's an error, stay on explore screen
+      setCurrentUserProfile(null);
     }
   };
 
   const checkBrowseLimits = async () => {
     try {
-      const { data: profile } = await ProfileService.getCurrentProfile();
+      const { data: profile, error } = await ProfileService.getCurrentProfile();
+      
+      // If no profile found, allow browsing with limited access
+      if (error && (error.code === 'PGRST116' || error.message?.includes('0 rows'))) {
+        console.log('ExploreScreen: No profile - allowing limited browse access');
+        setBrowseCount(0);
+        setMaxBrowseLimit(5); // Limited access for users without profile
+        setIsProfileComplete(false);
+        return;
+      }
+      
       if (profile) {
+        // Check if we need to reset the daily browse count
+        const today = new Date().toISOString().split('T')[0]; // Get today's date in YYYY-MM-DD format
+        const lastResetDate = profile.last_browse_reset_date || '';
+        
+        // If it's a new day, reset the browse count
+        if (today !== lastResetDate && lastResetDate !== '') {
+          console.log('ExploreScreen: Resetting browse count for new day');
+          await ProfileService.updateBrowseCount(0);
+          // Reload profile to get updated count
+          const { data: updatedProfile } = await ProfileService.getCurrentProfile();
+          if (updatedProfile) {
+            setBrowseCount(0);
+          }
+        } else {
+          setBrowseCount(profile.profiles_browsed_today || 0);
+        }
+        
         // Use a more reasonable completion check
         const hasBasicInfo = profile.first_name && profile.last_name && profile.birth_date && 
                            profile.country && profile.gender && profile.seeking && profile.bio;
         setIsProfileComplete(!!hasBasicInfo);
         setMaxBrowseLimit(hasBasicInfo ? Infinity : 5);
-        setBrowseCount(profile.profiles_browsed_today || 0);
       }
     } catch (error) {
       console.error('Failed to check browse limits:', error);
+      // Allow limited access on error
+      setBrowseCount(0);
+      setMaxBrowseLimit(5);
+      setIsProfileComplete(false);
     }
   };
 
@@ -351,6 +434,12 @@ export const ExploreScreen: React.FC<ExploreScreenProps> = ({ onNavigateToChat, 
   if (profiles.length === 0) {
     return (
       <SafeAreaView style={styles.container}>
+        {/* Daily Quote Modal - Add to empty state too */}
+        <DailyQuoteModalCard 
+          visible={showDailyQuote} 
+          onClose={() => setShowDailyQuote(false)} 
+        />
+        
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyTitle}>No More Profiles</Text>
           <Text style={styles.emptyText}>
@@ -366,15 +455,41 @@ export const ExploreScreen: React.FC<ExploreScreenProps> = ({ onNavigateToChat, 
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Daily Quote Modal */}
+      <DailyQuoteModalCard 
+        visible={showDailyQuote} 
+        onClose={() => setShowDailyQuote(false)} 
+      />
+      
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.title}>Explore</Text>
-        {!isProfileComplete && (
-          <Text style={styles.browseLimit}>
-            {browseCount}/{maxBrowseLimit} profiles today
-          </Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.title}>Explore</Text>
+          {!isProfileComplete && (
+            <Text style={styles.browseLimit}>
+              {browseCount}/{maxBrowseLimit} profiles today
+            </Text>
+          )}
+        </View>
+        {user && (
+          <TouchableOpacity 
+            style={styles.quoteIconButton} 
+            onPress={() => {
+              console.log('Quote button pressed, opening modal');
+              setShowDailyQuote(true);
+            }}
+          >
+            <Text style={styles.quoteIcon}>✨</Text>
+          </TouchableOpacity>
         )}
       </View>
+
+      {/* Daily Quote Card */}
+      {user && (
+        <DailyQuoteCard 
+          onPress={() => setShowDailyQuote(true)} 
+        />
+      )}
 
       {/* Profile Cards */}
       <View style={styles.cardsContainer}>
@@ -425,10 +540,31 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e0e0e0',
   },
+  headerLeft: {
+    flex: 1,
+  },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
     color: '#333',
+  },
+  quoteIconButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#FF6B6B',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#FF6B6B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+  },
+  quoteIcon: {
+    fontSize: 28,
   },
   browseLimit: {
     fontSize: 14,
